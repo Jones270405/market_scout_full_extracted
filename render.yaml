@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: market-scout
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    envVars:
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: MARKET_SCOUT_OUTPUT_DIR
+        value: /tmp/market_scout_outputs
+      - key: PYTHONUNBUFFERED
+        value: "1"
+
+# ── Persistent disk (Starter plan only) ──────────────────────────────────────
+# Uncomment after upgrading to Starter ($7/mo):
+#
+#    disk:
+#      name: market-scout-data
+#      mountPath: /tmp/market_scout_outputs
+#      sizeGB: 1
