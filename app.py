@@ -537,7 +537,7 @@ with gr.Blocks(
         value=[[None, WELCOME_MSG]],
         elem_id="ms-chatbot",
         show_label=False,
-        bubble_full_width=False,
+        # bubble_full_width=False,
         height=None,        # controlled by CSS calc
         scale=1,
         avatar_images=(
