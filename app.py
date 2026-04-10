@@ -1,6 +1,18 @@
-# app.py — Market Scout · Chat UI (Gradio Chatbot, dark purple)
-import os, sys, re
+# app.py
+"""
+Market Scout — Gradio UI
+Replaces Chainlit. Works reliably on Render free tier.
+Run locally : python app.py
+Deploy      : Render (see render.yaml)
+"""
+
+import os
+import sys
+import re
+import asyncio
+import threading
 from pathlib import Path
+from datetime import datetime
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
@@ -16,10 +28,13 @@ from guardrails.callbacks import (
     MIN_QUERY_LEN, MAX_QUERY_LEN,
 )
 
-OUTPUT_DIR = os.environ.get("MARKET_SCOUT_OUTPUT_DIR", os.path.join(_HERE, "outputs"))
+OUTPUT_DIR = os.environ.get(
+    "MARKET_SCOUT_OUTPUT_DIR",
+    os.path.join(_HERE, "outputs"),
+)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
+# ─── Company name extraction ──────────────────────────────────────────────────
 
 _ACTION_PREFIXES = re.compile(
     r"^(track|monitor|research|analyse|analyze|check|find|get|show|give me|"
@@ -30,91 +45,80 @@ _ACTION_PREFIXES = re.compile(
 _COMPARE_PATTERN = re.compile(r"^(?:compare|vs\.?|versus)\s+", re.IGNORECASE)
 _AND_PATTERN     = re.compile(r"\s+(?:and|vs\.?|versus)\s+", re.IGNORECASE)
 
-def _extract_companies(text):
+def _extract_companies(text: str) -> str:
     text = text.strip()
     for _ in range(3):
         new = _ACTION_PREFIXES.sub("", text).strip()
         new = _COMPARE_PATTERN.sub("", new).strip()
-        if new == text: break
+        if new == text:
+            break
         text = new
     text = _AND_PATTERN.sub(", ", text)
     text = re.sub(
         r"\s+(?:latest|recent|new|updates?|features?|releases?|news|info|information)$",
-        "", text, flags=re.IGNORECASE).strip()
+        "", text, flags=re.IGNORECASE,
+    ).strip()
     return text
 
-def _check_input(text):
-    if len(text) < MIN_QUERY_LEN: return f"⚠️ Query too short (min {MIN_QUERY_LEN} chars)."
-    if len(text) > MAX_QUERY_LEN: return f"⚠️ Query too long (max {MAX_QUERY_LEN} chars)."
+# ─── Guardrail ────────────────────────────────────────────────────────────────
+
+def _check_input(text: str) -> str | None:
+    if len(text) < MIN_QUERY_LEN:
+        return f"⚠️ Query too short (minimum {MIN_QUERY_LEN} characters)."
+    if len(text) > MAX_QUERY_LEN:
+        return f"⚠️ Query too long (maximum {MAX_QUERY_LEN} characters)."
     lower = text.lower()
     for p in HARMFUL_PATTERNS:
-        if re.search(p, lower): return "🚫 Harmful intent detected. I only help with competitor intelligence."
+        if re.search(p, lower):
+            return "🚫 Harmful intent detected. I can only help with competitor intelligence."
     for p in INJECTION_PATTERNS:
-        if re.search(p, lower): return "🚫 Prompt injection detected."
+        if re.search(p, lower):
+            return "🚫 Prompt injection attempt detected."
     for p in OUT_OF_SCOPE:
-        if re.search(p, lower): return "ℹ️ I only track competitor updates. Try: `Track Stripe`"
+        if re.search(p, lower):
+            return "ℹ️ I only track competitor updates. Try: 'Track Stripe'."
     return None
 
-GREETINGS = {"hi","hello","hey","greetings","good morning","good afternoon","good evening","howdy","sup","yo"}
+# ─── Main handler ─────────────────────────────────────────────────────────────
 
-WELCOME_MSG = """👋 **Welcome to Market Scout — Competitive Intelligence Assistant!**
+def handle_query(user_input: str):
+    """
+    Yields incremental status updates, then returns:
+      (markdown_report, pdf_path, excel_path, briefing_path, dashboard_path)
+    """
+    text = user_input.strip()
 
-I help you track and analyse competitor product updates in real time.
-
-**Here's what you can ask me:**
-
-| Example Query | What happens |
-|:---|:---|
-| `Track Stripe` | Full intelligence run for Stripe |
-| `What's new at Tesla?` | Latest feature updates for Tesla |
-| `Compare Stripe and PayPal` | Side-by-side analysis of both |
-| `Nike latest features` | Recent product moves by Nike |
-| `OpenAI, Anthropic` | Track multiple companies at once |
-
-After each run I generate a **PDF report**, **Excel workbook**, **text briefing**, and an **HTML dashboard** — all available to download below the chat.
-
----
-*Type a company name below or click an example to get started.*"""
-
-# ─── Chat handler ─────────────────────────────────────────────────────────────
-
-def respond(message, history):
-    """Yields (history, file_list) tuples for streaming."""
-    text = message.strip()
-    history = history or []
-
-    # Greeting
-    if text.lower() in GREETINGS:
-        history.append((text, "👋 Hello! Type a company name to get started, e.g. `Track Stripe`."))
-        yield history, []
+    GREETING_TRIGGERS = {"hi","hello","hey","greetings","good morning",
+                         "good afternoon","good evening","howdy","sup","yo"}
+    if text.lower() in GREETING_TRIGGERS:
+        yield (
+            "👋 Hello! Type a company name to get started.\n\n"
+            "Examples: `Stripe` · `Track Tesla` · `Compare PayPal and Stripe`",
+            None, None, None, None
+        )
         return
 
-    # Guardrail
     block = _check_input(text)
     if block:
-        history.append((text, block))
-        yield history, []
+        yield (block, None, None, None, None)
         return
 
-    # Extract company
     query = _extract_companies(text)
     if not query:
-        history.append((text, "Please enter a company name. Example: `Stripe`"))
-        yield history, []
+        yield ("Please enter a company name. Example: `Stripe`", None, None, None, None)
         return
 
-    # Thinking message
-    history.append((text, f"🔎 Analysing **{query}** — please wait 20–40 seconds…"))
-    yield history, []
+    yield (f"🔎 Searching for **{query}** — this may take 20–40 seconds…", None, None, None, None)
 
-    # Run pipeline
     try:
         result = run_pipeline(query)
     except Exception as exc:
-        history[-1] = (text,
+        yield (
             f"❌ **Pipeline error:** `{str(exc)}`\n\n"
-            "Please ensure **TAVILY_API_KEY** and **GROQ_API_KEY** are set in Render → Environment.")
-        yield history, []
+            "Check that **TAVILY_API_KEY** and **GROQ_API_KEY** are set in "
+            "Render → Environment.",
+            None, None, None, None
+        )
         return
 
     summary          = result.get("summary", {})
@@ -122,289 +126,296 @@ def respond(message, history):
     files            = result.get("files", {})
     comparison_table = result.get("comparison_table", "")
 
-    status_icons = {"WEEK":"🟢","MONTH":"🟡","YEAR":"🔵","UNVERIFIED":"⚪","STALE":"🔴"}
-
+    # ── Features section ──
     if top_features:
         features_md = ""
         for i, f in enumerate(top_features, 1):
-            icon = status_icons.get(f.get("status",""), "⚪")
-            url_md = f" · [🔗 Source]({f['url']})" if f.get("url") else ""
+            url_md = f"\n  - 🔗 [Source]({f['url']})" if f.get("url") else ""
             features_md += (
                 f"**{i}. {f['feature']}**  \n"
-                f"&nbsp;&nbsp;`{f.get('category','—')}` &nbsp;·&nbsp; "
-                f"{f.get('date','unknown')} &nbsp;·&nbsp; "
-                f"{icon} `{f.get('status','—')}`{url_md}\n\n"
+                f"  `{f['category']}` · {f['date']} · **{f['status']}**"
+                f"{url_md}\n\n"
             )
     else:
-        features_md = "> ⚠️ No features found. Ensure **TAVILY_API_KEY** is set in Render → Environment.\n"
+        features_md = (
+            "> ⚠️ No features found. This usually means **TAVILY_API_KEY** "
+            "is not set in Render → Environment → add it and redeploy.\n"
+        )
 
-    comparison_md = f"\n### ⚖️ Comparison\n\n{comparison_table}\n" if comparison_table else ""
+    comparison_md = ""
+    if comparison_table:
+        comparison_md = f"\n### ⚖️ Company Comparison\n\n{comparison_table}\n"
 
-    response = f"""## 📊 {result['company']} — Intelligence Report
-*{result['run_date']} &nbsp;·&nbsp; {result['version']}*
+    report = f"""## 📊 Market Scout Report
+**Company:** {result['company']} &nbsp;|&nbsp; **Run Date:** {result['run_date']} &nbsp;|&nbsp; **Version:** {result['version']}
 
 ---
 
-### 📈 Summary
+### 📈 Findings Summary
 
 | Timeframe | Count | Status |
-|:---|---:|:---|
-| **Total Features** | **{summary.get('total',0)}** | — |
-| Last 7 Days | {summary.get('week',0)} | 🟢 WEEK |
-| Last 30 Days | {summary.get('month',0)} | 🟡 MONTH |
-| Last 365 Days | {summary.get('year',0)} | 🔵 YEAR |
-| Unverified | {summary.get('unver',0)} | ⚪ |
+|:----------|------:|:-------|
+| Total Features | {summary.get('total', 0)} | — |
+| Last 7 Days | {summary.get('week', 0)} | 🟢 WEEK |
+| Last 30 Days | {summary.get('month', 0)} | 🟡 MONTH |
+| Last 365 Days | {summary.get('year', 0)} | 🔵 YEAR |
+| Unverified | {summary.get('unver', 0)} | ⚪ Unknown |
 
 ---
 
 ### 🔑 Top Features
 
-{features_md}{comparison_md}---
+{features_md}{comparison_md}
+---
 
-📁 **Reports saved** — download below 👇  
-*Powered by Google ADK · Groq LLaMA 3.3 · Tavily Search*"""
+*Powered by Google ADK · Groq LLaMA 3.3 · Tavily Search*
+"""
 
-    # Collect downloadable files
-    file_list = []
-    for key in ("pdf", "excel", "briefing", "dashboard"):
+    # Resolve file paths — return None if file doesn't exist (Gradio skips None)
+    def _path(key):
         p = files.get(key, "")
-        if p and Path(p).exists():
-            file_list.append(p)
+        return p if p and Path(p).exists() else None
 
-    history[-1] = (text, response)
-    yield history, file_list
+    yield (report, _path("pdf"), _path("excel"), _path("briefing"), _path("dashboard"))
 
 
-def use_example(example_text):
-    return example_text
+# ─── Gradio UI ────────────────────────────────────────────────────────────────
 
-
-# ─── CSS ──────────────────────────────────────────────────────────────────────
+EXAMPLES = [
+    ["Stripe"],
+    ["Track Tesla"],
+    ["Compare PayPal and Stripe"],
+    ["Nike latest features"],
+    ["OpenAI"],
+]
 
 CSS = """
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 
 :root {
-  --bg-base:    #0d0d1a;
-  --bg-surface: #111127;
-  --bg-card:    #16162e;
-  --bg-input:   #1c1c38;
-  --bg-bubble-user: #1e1040;
-  --bg-bubble-bot:  #141428;
-  --border:     #252545;
-  --border-glow:#7c3aed;
-  --purple-1:   #7c3aed;
-  --purple-2:   #9d5cf6;
-  --purple-3:   #c084fc;
-  --purple-4:   #e9d5ff;
-  --text-1:     #f1f0ff;
-  --text-2:     #a89ec9;
-  --text-3:     #5a5480;
-  --radius:     14px;
-  --shadow:     0 4px 24px rgba(124,58,237,0.12);
+  --bg-base:        #09090f;
+  --bg-surface:     #0f0d1f;
+  --bg-card:        #12102a;
+  --bg-input:       #12102a;
+  --bg-bubble-user: #1a1040;
+  --bg-bubble-bot:  #0f0d1f;
+  --border:         #1e1b3a;
+  --border-accent:  #2e2860;
+  --border-glow:    #5b21b6;
+  --purple-1:       #5b21b6;
+  --purple-2:       #7c3aed;
+  --purple-3:       #a78bfa;
+  --purple-4:       #ddd6fe;
+  --text-1:         #e2dcf8;
+  --text-2:         #9d96c0;
+  --text-3:         #4b4870;
+  --radius:         12px;
 }
 
 *, *::before, *::after { box-sizing: border-box; }
 
 body, .gradio-container, #root {
   background: var(--bg-base) !important;
-  font-family: 'Inter', sans-serif !important;
+  font-family: 'Inter', system-ui, sans-serif !important;
   color: var(--text-1) !important;
 }
 
 .gradio-container {
-  max-width: 860px !important;
+  max-width: 880px !important;
   margin: 0 auto !important;
-  padding: 0 0 40px !important;
+  padding: 0 0 48px !important;
 }
 
 footer, .footer, .svelte-1gfkn6j { display: none !important; }
 
-/* ── Top bar ── */
+/* ── Topbar ── */
 #topbar {
-  background: linear-gradient(135deg, #13122a 0%, #1a1035 100%);
+  background: var(--bg-surface);
   border-bottom: 1px solid var(--border);
-  padding: 16px 28px;
+  padding: 14px 24px;
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 14px;
   position: sticky;
   top: 0;
   z-index: 100;
 }
 #topbar .logo {
-  width: 34px; height: 34px;
-  background: linear-gradient(135deg, #7c3aed, #4f46e5);
-  border-radius: 9px;
+  width: 36px; height: 36px;
+  background: var(--purple-1);
+  border-radius: 10px;
   display: flex; align-items: center; justify-content: center;
-  font-size: 16px;
-  box-shadow: 0 2px 12px rgba(124,58,237,0.5);
+  font-size: 15px;
   flex-shrink: 0;
 }
 #topbar h2 {
-  font-size: 1.05rem; font-weight: 700;
-  background: linear-gradient(90deg, #c084fc, #818cf8);
-  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-  background-clip: text;
+  font-size: 15px; font-weight: 700;
+  color: var(--purple-4);
+  letter-spacing: -0.3px;
   margin: 0;
 }
-#topbar p { font-size: 0.76rem; color: var(--text-3); margin: 0; }
+#topbar p { font-size: 11px; color: var(--text-3); margin: 2px 0 0; letter-spacing: 0.2px; }
 #topbar .badges { margin-left: auto; display: flex; gap: 6px; }
 #topbar .badge {
-  background: rgba(124,58,237,0.15);
-  border: 1px solid rgba(124,58,237,0.3);
+  background: var(--bg-card);
+  border: 1px solid var(--border-accent);
   color: var(--purple-3);
   padding: 3px 10px; border-radius: 20px;
-  font-size: 0.72rem; font-weight: 500;
+  font-size: 10.5px; font-weight: 500; letter-spacing: 0.2px;
 }
 
 /* ── Chatbot ── */
 #chatbot {
-  background: var(--bg-surface) !important;
+  background: var(--bg-base) !important;
   border: none !important;
   border-radius: 0 !important;
   min-height: 480px;
-  padding: 0 !important;
+  padding: 8px 0 !important;
 }
 
-/* message bubbles */
 .message-wrap { padding: 8px 24px !important; }
 
 .message.user .bubble-wrap .md {
   background: var(--bg-bubble-user) !important;
-  border: 1px solid rgba(124,58,237,0.25) !important;
-  border-radius: 18px 18px 4px 18px !important;
-  color: var(--text-1) !important;
-  padding: 12px 16px !important;
-  font-size: 0.92rem !important;
-  max-width: 75% !important;
+  border: 1px solid var(--border-accent) !important;
+  border-radius: 16px 4px 16px 16px !important;
+  color: var(--purple-4) !important;
+  padding: 11px 15px !important;
+  font-size: 13.5px !important;
+  max-width: 70% !important;
   margin-left: auto !important;
 }
 
 .message.bot .bubble-wrap .md {
   background: var(--bg-bubble-bot) !important;
   border: 1px solid var(--border) !important;
-  border-radius: 4px 18px 18px 18px !important;
+  border-radius: 4px 16px 16px 16px !important;
   color: var(--text-2) !important;
-  padding: 16px 20px !important;
-  font-size: 0.9rem !important;
+  padding: 15px 19px !important;
+  font-size: 13px !important;
   line-height: 1.7 !important;
-  max-width: 90% !important;
+  max-width: 88% !important;
 }
 
-/* bot avatar */
 .message.bot .avatar-container {
-  background: linear-gradient(135deg,#7c3aed,#4f46e5) !important;
+  background: var(--purple-1) !important;
   border-radius: 50% !important;
   width: 30px !important; height: 30px !important;
 }
 
-/* markdown inside bubbles */
+/* Markdown inside bot bubble */
 .message.bot .bubble-wrap h2 {
-  font-size: 1.1rem !important; font-weight: 700 !important;
-  color: var(--purple-3) !important; margin-bottom: 4px !important;
+  font-size: 14px !important; font-weight: 700 !important;
+  color: var(--purple-4) !important;
+  margin-bottom: 6px !important;
   border: none !important; padding: 0 !important;
+  letter-spacing: -0.2px !important;
 }
 .message.bot .bubble-wrap h3 {
-  font-size: 0.92rem !important; font-weight: 600 !important;
-  color: var(--purple-4) !important;
-  margin: 16px 0 8px !important;
+  font-size: 11px !important; font-weight: 600 !important;
+  color: var(--purple-3) !important;
+  margin: 14px 0 7px !important;
   padding-left: 8px !important;
   border-left: 2px solid var(--purple-1) !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.5px !important;
 }
 .message.bot .bubble-wrap strong { color: var(--text-1) !important; }
-.message.bot .bubble-wrap em { color: var(--text-3) !important; font-size: 0.82rem !important; }
+.message.bot .bubble-wrap em { color: var(--text-3) !important; font-size: 11px !important; }
 .message.bot .bubble-wrap hr { border-color: var(--border) !important; margin: 12px 0 !important; }
 .message.bot .bubble-wrap a { color: var(--purple-3) !important; }
 .message.bot .bubble-wrap a:hover { color: var(--purple-4) !important; }
 .message.bot .bubble-wrap code {
-  background: rgba(124,58,237,0.15) !important;
+  background: rgba(91,33,182,0.18) !important;
   color: var(--purple-3) !important;
-  border: 1px solid rgba(124,58,237,0.2) !important;
+  border: 1px solid rgba(91,33,182,0.25) !important;
   border-radius: 5px !important;
   padding: 1px 6px !important;
   font-family: 'JetBrains Mono', monospace !important;
-  font-size: 0.8rem !important;
+  font-size: 11px !important;
 }
 .message.bot .bubble-wrap blockquote {
-  border-left: 3px solid #fbbf24 !important;
-  background: rgba(251,191,36,0.07) !important;
-  padding: 8px 14px !important; border-radius: 0 8px 8px 0 !important;
+  border-left: 2px solid #f59e0b !important;
+  background: rgba(245,158,11,0.08) !important;
+  padding: 8px 14px !important;
+  border-radius: 0 8px 8px 0 !important;
   margin: 8px 0 !important;
 }
-.message.bot .bubble-wrap blockquote p { color: #fbbf24 !important; }
+.message.bot .bubble-wrap blockquote p { color: #fbbf24 !important; font-size: 12.5px !important; }
 
-/* tables inside bubbles */
+/* Tables in bot bubble */
 .message.bot .bubble-wrap table {
   width: 100% !important; border-collapse: collapse !important;
-  margin: 10px 0 !important; font-size: 0.85rem !important;
+  margin: 10px 0 !important; font-size: 12px !important;
 }
-.message.bot .bubble-wrap thead tr { background: rgba(124,58,237,0.15) !important; }
+.message.bot .bubble-wrap thead tr { background: rgba(91,33,182,0.14) !important; }
 .message.bot .bubble-wrap th {
   color: var(--purple-3) !important; font-weight: 600 !important;
-  padding: 8px 12px !important; text-align: left !important;
-  border-bottom: 1px solid var(--border-glow) !important;
-  font-size: 0.78rem !important; text-transform: uppercase !important; letter-spacing: 0.4px !important;
+  padding: 7px 11px !important; text-align: left !important;
+  border-bottom: 1px solid var(--border-accent) !important;
+  font-size: 10px !important; text-transform: uppercase !important; letter-spacing: 0.5px !important;
 }
 .message.bot .bubble-wrap td {
-  padding: 8px 12px !important; border-bottom: 1px solid var(--border) !important;
+  padding: 7px 11px !important; border-bottom: 1px solid var(--border) !important;
   color: var(--text-2) !important;
 }
-.message.bot .bubble-wrap tbody tr:hover { background: rgba(124,58,237,0.05) !important; }
+.message.bot .bubble-wrap tbody tr:last-child td { border-bottom: none !important; }
+.message.bot .bubble-wrap tbody tr:hover { background: rgba(91,33,182,0.04) !important; }
 
-/* ── Input row ── */
+/* ── Input area ── */
 #input-row {
-  background: var(--bg-card);
+  background: var(--bg-surface);
   border-top: 1px solid var(--border);
-  padding: 16px 20px;
-  display: flex; gap: 10px; align-items: flex-end;
+  padding: 14px 20px;
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
 }
 
 #chat-input textarea {
   background: var(--bg-input) !important;
   border: 1px solid var(--border) !important;
-  border-radius: 12px !important;
+  border-radius: 11px !important;
   color: var(--text-1) !important;
   font-family: 'Inter', sans-serif !important;
-  font-size: 0.95rem !important;
-  padding: 12px 16px !important;
+  font-size: 13.5px !important;
+  padding: 11px 15px !important;
   resize: none !important;
   transition: border-color 0.2s, box-shadow 0.2s !important;
-  caret-color: var(--purple-2);
+  caret-color: var(--purple-3);
 }
 #chat-input textarea:focus {
   border-color: var(--border-glow) !important;
-  box-shadow: 0 0 0 3px rgba(124,58,237,0.12) !important;
+  box-shadow: 0 0 0 3px rgba(91,33,182,0.14) !important;
   outline: none !important;
 }
 #chat-input textarea::placeholder { color: var(--text-3) !important; }
 
-/* send button */
 #send-btn {
-  background: linear-gradient(135deg, #7c3aed, #5b21b6) !important;
-  border: none !important; border-radius: 12px !important;
+  background: var(--purple-1) !important;
+  border: none !important; border-radius: 11px !important;
   color: #fff !important; font-weight: 600 !important;
-  font-size: 0.9rem !important; padding: 12px 22px !important;
+  font-size: 13px !important; padding: 11px 20px !important;
   cursor: pointer !important;
-  box-shadow: 0 3px 12px rgba(124,58,237,0.4) !important;
-  transition: all 0.2s !important;
+  transition: background 0.2s, transform 0.15s !important;
   white-space: nowrap;
+  letter-spacing: 0.2px;
 }
 #send-btn:hover {
-  background: linear-gradient(135deg, #9d5cf6, #7c3aed) !important;
-  box-shadow: 0 5px 18px rgba(124,58,237,0.55) !important;
+  background: var(--purple-2) !important;
   transform: translateY(-1px) !important;
 }
+#send-btn:active { transform: scale(0.98) !important; }
 
-/* ── Examples strip ── */
+/* ── Example chips ── */
 #examples-row {
-  background: var(--bg-card);
+  background: var(--bg-surface);
   border-top: 1px solid var(--border);
-  padding: 12px 20px 14px;
-  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  padding: 11px 20px 13px;
+  display: flex; flex-wrap: wrap; gap: 7px; align-items: center;
 }
 #examples-label {
-  font-size: 0.72rem; text-transform: uppercase;
+  font-size: 10px; text-transform: uppercase;
   letter-spacing: 1px; color: var(--text-3); font-weight: 600;
   margin-right: 4px; white-space: nowrap;
 }
@@ -414,43 +425,50 @@ footer, .footer, .svelte-1gfkn6j { display: none !important; }
   border-radius: 20px !important;
   color: var(--purple-3) !important;
   font-family: 'JetBrains Mono', monospace !important;
-  font-size: 0.78rem !important; font-weight: 500 !important;
-  padding: 5px 14px !important;
+  font-size: 11px !important; font-weight: 500 !important;
+  padding: 4px 13px !important;
   cursor: pointer !important;
   transition: all 0.15s !important;
+  letter-spacing: 0.1px !important;
 }
 .example-chip button:hover {
-  background: rgba(124,58,237,0.15) !important;
+  background: rgba(91,33,182,0.15) !important;
   border-color: var(--border-glow) !important;
   color: var(--purple-4) !important;
   transform: translateY(-1px) !important;
 }
 
-/* ── Download section ── */
+/* ── Downloads ── */
 #dl-header {
-  padding: 18px 24px 6px;
-  font-size: 0.72rem; text-transform: uppercase;
+  padding: 14px 24px 6px;
+  font-size: 10px; text-transform: uppercase;
   letter-spacing: 1px; color: var(--text-3); font-weight: 600;
-  background: var(--bg-card);
+  background: #0c0b1a;
   border-top: 1px solid var(--border);
 }
 #downloads {
-  background: var(--bg-card);
-  padding: 6px 20px 20px;
+  background: #0c0b1a;
+  padding: 8px 20px 20px;
+  display: grid !important;
+  grid-template-columns: repeat(4, 1fr) !important;
+  gap: 9px !important;
 }
 #downloads .gr-file-preview, .file-preview {
-  background: var(--bg-input) !important;
+  background: var(--bg-card) !important;
   border: 1px solid var(--border) !important;
   border-radius: 10px !important;
   color: var(--text-2) !important;
-  transition: border-color 0.2s;
+  transition: border-color 0.2s, background 0.2s;
 }
-#downloads .gr-file-preview:hover { border-color: var(--border-glow) !important; }
+#downloads .gr-file-preview:hover {
+  border-color: var(--border-glow) !important;
+  background: rgba(91,33,182,0.08) !important;
+}
 
 /* ── Scrollbar ── */
-::-webkit-scrollbar { width: 5px; }
-::-webkit-scrollbar-track { background: var(--bg-base); }
-::-webkit-scrollbar-thumb { background: var(--border-glow); border-radius: 3px; }
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-glow); border-radius: 4px; }
 
 /* ── Gradio overrides ── */
 .gr-group, .gr-box { background: transparent !important; border: none !important; }
@@ -458,109 +476,76 @@ footer, .footer, .svelte-1gfkn6j { display: none !important; }
 .gr-padded { padding: 0 !important; }
 """
 
-# ─── Build UI ─────────────────────────────────────────────────────────────────
-
-EXAMPLES = [
-    "Track Stripe",
-    "What's new at Tesla?",
-    "Compare Stripe and PayPal",
-    "Nike latest features",
-    "OpenAI, Anthropic",
-]
-
 with gr.Blocks(
     title="Market Scout — Competitive Intelligence",
-    # theme=gr.themes.Base(),
-    # css=CSS,
+    theme=gr.themes.Soft(primary_hue="blue", neutral_hue="slate"),
+    css=CSS,
 ) as demo:
 
-    # ── Top bar ──
     gr.HTML("""
-    <div id="topbar">
-      <div class="logo">🔍</div>
-      <div>
-        <h2>Market Scout</h2>
-        <p>Competitive Intelligence Assistant</p>
-      </div>
-      <div class="badges">
-        <span class="badge">Google ADK</span>
-        <span class="badge">Groq LLaMA 3.3</span>
-        <span class="badge">Tavily Search</span>
-      </div>
+    <div id="header">
+      <h1>🔍 Market Scout</h1>
+      <p>AI-powered Competitive Intelligence &nbsp;·&nbsp;
+         Google ADK &nbsp;·&nbsp; Groq LLaMA 3.3 &nbsp;·&nbsp; Tavily Search</p>
     </div>
     """)
 
-    # ── Chat window ──
-    chatbot = gr.Chatbot(
-        value=[[None, WELCOME_MSG]],
-        elem_id="chatbot",
-        # bubble_full_width=False,
-        show_label=False,
-        height=500,
-        avatar_images=(None, "https://api.dicebear.com/7.x/bottts-neutral/svg?seed=scout&backgroundColor=7c3aed"),
-    )
-
-    # ── Input row ──
-    with gr.Row(elem_id="input-row"):
-        chat_input = gr.Textbox(
-            placeholder="Type a company name… e.g. Stripe or Compare PayPal and Stripe",
-            show_label=False,
-            lines=1,
-            scale=5,
-            elem_id="chat-input",
-            autofocus=True,
-        )
-        send_btn = gr.Button("Send ➤", elem_id="send-btn", scale=1, min_width=90)
-
-    # ── Example chips ──
-    gr.HTML('<div id="examples-row"><span id="examples-label">Try:</span></div>')
     with gr.Row():
-        chip_btns = [
-            gr.Button(ex, elem_classes=["example-chip"], size="sm", min_width=0)
-            for ex in EXAMPLES
-        ]
+        with gr.Column(scale=3):
+            user_input = gr.Textbox(
+                label="Company or query",
+                placeholder="e.g.  Stripe   |   Track Tesla   |   Compare PayPal and Stripe",
+                lines=1,
+                autofocus=True,
+            )
+            run_btn = gr.Button("🚀 Run Analysis", variant="primary", size="lg")
 
-    # ── Download section ──
-    gr.HTML('<div id="dl-header">📎 Download Reports</div>')
-    with gr.Row(elem_id="downloads"):
-        pdf_out       = gr.File(label="📄 PDF Report",     interactive=False)
-        excel_out     = gr.File(label="📊 Excel Workbook", interactive=False)
-        briefing_out  = gr.File(label="📝 Text Briefing",  interactive=False)
-        dashboard_out = gr.File(label="🌐 HTML Dashboard", interactive=False)
+        with gr.Column(scale=1):
+            gr.Markdown("""
+**Quick examples:**
+- `Stripe`
+- `Track Tesla`
+- `Compare PayPal and Stripe`
+- `Nike latest features`
+- `OpenAI, Anthropic`
+            """)
 
-    # ── Wire events ──
-    def _unpack(history, files):
-        """Split flat file list back into 4 outputs."""
-        def _get(i): return files[i] if files and i < len(files) else None
-        return history, _get(0), _get(1), _get(2), _get(3)
-
-    outputs = [chatbot, pdf_out, excel_out, briefing_out, dashboard_out]
-
-    def submit_and_clear(msg, history):
-        results = None
-        for history, files in respond(msg, history):
-            results = (history, files)
-            yield history, "", *([None]*4)
-        if results:
-            h, files = results
-            def _get(i): return files[i] if files and i < len(files) else None
-            yield h, "", _get(0), _get(1), _get(2), _get(3)
-
-    send_btn.click(
-        fn=submit_and_clear,
-        inputs=[chat_input, chatbot],
-        outputs=[chatbot, chat_input, pdf_out, excel_out, briefing_out, dashboard_out],
-    )
-    chat_input.submit(
-        fn=submit_and_clear,
-        inputs=[chat_input, chatbot],
-        outputs=[chatbot, chat_input, pdf_out, excel_out, briefing_out, dashboard_out],
+    report_out = gr.Markdown(
+        value="*Enter a company name above and click Run Analysis.*",
+        label="Report",
+        elem_classes=["report-box"],
     )
 
-    for btn, ex in zip(chip_btns, EXAMPLES):
-        btn.click(fn=lambda e=ex: e, outputs=chat_input)
+    gr.Markdown("### 📎 Download Reports")
+    with gr.Row():
+        pdf_out      = gr.File(label="📄 PDF Report",      visible=True, interactive=False)
+        excel_out    = gr.File(label="📊 Excel Workbook",  visible=True, interactive=False)
+        briefing_out = gr.File(label="📝 Text Briefing",   visible=True, interactive=False)
+        dashboard_out= gr.File(label="🌐 HTML Dashboard",  visible=True, interactive=False)
+
+    gr.Examples(
+        examples=EXAMPLES,
+        inputs=user_input,
+        label="Example queries",
+    )
+
+    # Wire up button and Enter key
+    run_btn.click(
+        fn=handle_query,
+        inputs=user_input,
+        outputs=[report_out, pdf_out, excel_out, briefing_out, dashboard_out],
+    )
+    user_input.submit(
+        fn=handle_query,
+        inputs=user_input,
+        outputs=[report_out, pdf_out, excel_out, briefing_out, dashboard_out],
+    )
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
-    demo.launch(server_name="0.0.0.0", server_port=port, share=False, show_error=True, theme=gr.themes.Base(),
-    css=CSS,)
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=port,
+        share=False,
+        show_error=True,
+    )
