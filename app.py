@@ -470,8 +470,8 @@ EXAMPLES = [
 
 with gr.Blocks(
     title="Market Scout — Competitive Intelligence",
-    theme=gr.themes.Base(),
-    css=CSS,
+    # theme=gr.themes.Base(),
+    # css=CSS,
 ) as demo:
 
     # ── Top bar ──
@@ -494,7 +494,7 @@ with gr.Blocks(
     chatbot = gr.Chatbot(
         value=[[None, WELCOME_MSG]],
         elem_id="chatbot",
-        bubble_full_width=False,
+        # bubble_full_width=False,
         show_label=False,
         height=500,
         avatar_images=(None, "https://api.dicebear.com/7.x/bottts-neutral/svg?seed=scout&backgroundColor=7c3aed"),
@@ -562,4 +562,5 @@ with gr.Blocks(
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
-    demo.launch(server_name="0.0.0.0", server_port=port, share=False, show_error=True)
+    demo.launch(server_name="0.0.0.0", server_port=port, share=False, show_error=True, theme=gr.themes.Base(),
+    css=CSS,)
